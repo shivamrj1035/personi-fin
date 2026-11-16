@@ -7,7 +7,7 @@ import { useData } from "@/lib/app-context";
 import type { VisualAnswer } from "@/lib/ai-types";
 
 type Msg = { id: number; who: "me"; text: string } | { id: number; who: "ai"; ans?: VisualAnswer; error?: string };
-const QUICK = ["Which loan should I clear first and why?", "Can I afford a prepayment this month?", "What are the biggest risks in my repayment plan?"];
+const QUICK = ["I have ₹50,000: where should I put it to save the most money?", "Which loan should I clear first and why?", "Can I afford a prepayment this month?", "What are the biggest risks in my repayment plan?"];
 
 export default function AskPage() {
   const { ai } = useData();
