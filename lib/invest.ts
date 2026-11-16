@@ -1,6 +1,7 @@
 /** the finance page: monthly buy / hold / sell suggestions. Decision support, not licensed investment advice. */
 import "server-only";
-import { MODEL, anthropic, parseJsonObject } from "./ai";
+import { parseJsonObject } from "./ai";
+import { complete } from "./llm";
 import { fmtDate, monthLong, today } from "./dates";
 import { holdingsRows } from "./holdings";
 import { State, num } from "./state";
@@ -43,17 +44,6 @@ export function buildInvestContext(state: State, investable: number) {
 export async function advise(state: State, investable: number, question = ""): Promise<Review> {
   const facts = JSON.stringify(buildInvestContext(state, investable));
   const ask = question.trim() || `Review my holdings for ${monthLong(today())}: what (if anything) to buy now with the investable amount, and for each holding whether to hold, add, trim or sell and at what trigger.`;
-  const messages: Parameters<ReturnType<typeof anthropic>["messages"]["create"]>[0]["messages"] = [
-    { role: "user", content: `${SHAPE}\n\nFACTS (JSON):\n${facts}\n\nQUESTION:\n${ask}` }];
-  let text = "";
-  for (let i = 0; i < 4; i++) { // server-side web search may pause long turns; resume them
-    const msg = await anthropic().messages.create({
-      model: MODEL, max_tokens: 4000, system: SYSTEM(fmtDate(today())), messages,
-      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
-    });
-    text = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
-    if (msg.stop_reason !== "pause_turn") break;
-    messages.push({ role: "assistant", content: msg.content });
-  }
+  const text = await complete(`${SYSTEM(fmtDate(today()))}\n\n${SHAPE}\n\nFACTS (JSON):\n${facts}\n\nQUESTION:\n${ask}`, { search: true, timeoutMs: 420_000 });
   return parseJsonObject<Review>(text, (d) => "buy" in d || "holdings" in d) ?? { text };
 }

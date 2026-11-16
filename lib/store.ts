@@ -15,6 +15,8 @@ import {
 } from "./dates";
 import * as L from "./loans";
 import { Row, State, Tabs, num, truthy } from "./state";
+import { LoanSnap, Op } from "./activity-types";
+import { pack } from "./activity";
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 
@@ -25,6 +27,7 @@ export const FLAT: Record<string, string[]> = {
   "Savings Log": ["month", "goal_id", "amount", "by", "note", "id"],
   Holdings: ["symbol", "name", "qty", "avg_price", "buy_date", "target_price", "stop_loss", "note", "id"],
   Settings: ["key", "value"],
+  "Activity Log": ["id", "at", "action", "summary", "status", "undone_at", "undo"],
 };
 const DEFAULT_SETTINGS = [["emergency_buffer", 0], ["persons", "Shivam,Rajesh,Hetal"], ["prepay_mode", "keep"], ["risk_profile", "moderate"], ["invest_horizon", "3-5 years"]];
 const LEGACY_TABS = new Set(["Sheet1", "Loans", "Schedule", "Payments", "Income"]);
@@ -55,6 +58,16 @@ export function colLetter(i: number): string {
   i += 1;
   while (i) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); }
   return s;
+}
+/** 'Tab'!K13 with a 1x4 block of values -> 'Tab'!K13:N13, so a recorded range always covers everything that was written. */
+function fullRange(range: string, values: unknown[][]): string {
+  const m = /^(.*!)([A-Z]+)(\d+)$/.exec(range);
+  if (!m) return range;
+  const cols = Math.max(...values.map((r) => r.length), 1), rows = Math.max(values.length, 1);
+  if (cols === 1 && rows === 1) return range;
+  let c0 = 0;
+  for (const ch of m[2]) c0 = c0 * 26 + (ch.charCodeAt(0) - 64);
+  return `${m[1]}${m[2]}${m[3]}:${colLetter(c0 - 1 + cols - 1)}${Number(m[3]) + rows - 1}`;
 }
 const q = (title: string) => "'" + title.replace(/'/g, "''") + "'";
 const bool = (v: unknown) => ["TRUE", "1"].includes(String(v ?? "").trim().toUpperCase());
@@ -87,6 +100,10 @@ export class Store {
   private api: sheets_v4.Sheets;
   private wss = new Map<string, Ws>();
   kpis: Record<string, Kpi> = {};
+  /** While set, user-intent writes push their inverse here (see lib/activity-types.ts). */
+  private rec: Op[] | null = null;
+  beginRecord() { this.rec = []; }
+  endRecord(): Op[] { const r = this.rec || []; this.rec = null; return r; }
 
   constructor() {
     const auth = new google.auth.GoogleAuth({ credentials: credentials(), scopes: SCOPES });
@@ -128,6 +145,21 @@ export class Store {
       spreadsheetId: SHEET_ID,
       requestBody: { valueInputOption: raw ? "RAW" : "USER_ENTERED", data: data.map(([range, v]) => ({ range, values: v as never })) },
     }));
+  }
+
+  /** Like values(), but remembers what the cells held so the change can be undone. */
+  private async valuesRec(data: [string, unknown[][]][], raw = true): Promise<void> {
+    if (this.rec && data.length) {
+      const full = data.map(([r, v]) => fullRange(r, v));
+      const res = await this.call(() => this.api.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, valueRenderOption: "UNFORMATTED_VALUE", ranges: full }));
+      this.rec.push({ op: "cells", writes: data.map(([, after], i) => {
+        const range = full[i];
+        const got = (res.data.valueRanges![i].values as unknown[][]) || [];
+        const cols = Math.max(...after.map((r) => r.length), 1);
+        return { range, after, before: after.map((_, r) => Array.from({ length: cols }, (_, c) => got[r]?.[c] ?? "")) };
+      }) });
+    }
+    await this.values(data, raw);
   }
 
   private async clear(ranges: string[]): Promise<void> {
@@ -211,7 +243,7 @@ export class Store {
     return String(tabs.Settings.find((r) => r.key === key)?.value ?? "");
   }
   private async setFlag(key: string, value: string): Promise<void> {
-    if (!(await this.updateRow("Settings", { key }, { value }))) await this.append("Settings", [{ key, value }]);
+    if (!(await this.updateRow("Settings", { key }, { value }))) await this.rawAppend("Settings", [{ key, value }]);
   }
 
   // ------------------------------------------------------------ setup
@@ -331,12 +363,17 @@ export class Store {
 
     this.kpis = kpis;
     const tabs: Tabs = { Loans: loans, Schedule: sched, Payments: pay, Extras: extras, Income: income, MonthItems: items,
-      Recurring: flat["Recurring Income"], Expenses: flat.Expenses, Goals: flat.Goals, Holdings: flat.Holdings, SavingsLog: flat["Savings Log"], Settings: flat.Settings };
+      Recurring: flat["Recurring Income"], Expenses: flat.Expenses, Goals: flat.Goals, Holdings: flat.Holdings, SavingsLog: flat["Savings Log"], Settings: flat.Settings,
+      Activity: flat["Activity Log"].map(({ undo, ...r }) => ({ ...r, undoable: r.status !== "undone" && !!String(undo || "").trim() })) };
     return { tabs, kpis };
   }
 
   // ------------------------------------------------------------ flat tabs
   async append(tab: string, rows: Row[]): Promise<void> {
+    if (this.rec) for (const r of rows) this.rec.push(FLAT[tab].includes("id") && r.id ? { op: "deleteFlatById", tab, id: String(r.id) } : { op: "deleteFlatMatch", tab, match: r });
+    await this.rawAppend(tab, rows);
+  }
+  private async rawAppend(tab: string, rows: Row[]): Promise<void> {
     const cols = FLAT[tab];
     const data = rows.map((r) => cols.map((c) => r[c] ?? ""));
     if (data.length) await this.call(() => this.api.spreadsheets.values.append({
@@ -344,11 +381,21 @@ export class Store {
   }
   async updateFlat(tab: string, row: number, vals: Row): Promise<void> {
     const cols = FLAT[tab];
+    if (this.rec && cols.includes("id")) {
+      const cur = (await this.getRange(`${q(tab)}!A${row}:${colLetter(cols.length - 1)}${row}`, false))[0] || [];
+      const before = Object.fromEntries(cols.map((c, j) => [c, cur[j] ?? ""]));
+      if (before.id) this.rec.push({ op: "updateFlatById", tab, id: String(before.id), vals: before });
+    }
     await this.values([[`${q(tab)}!A${row}:${colLetter(cols.length - 1)}${row}`, [cols.map((c) => vals[c] ?? "")]]]);
   }
   updateExpense(row: number, vals: Row) { return this.updateFlat("Expenses", row, vals); }
   deleteExpense(row: number) { return this.deleteFlat("Expenses", row); }
   async deleteFlat(tab: string, row: number): Promise<void> {
+    if (this.rec) {
+      const cols = FLAT[tab];
+      const cur = (await this.getRange(`${q(tab)}!A${row}:${colLetter(cols.length - 1)}${row}`, false))[0] || [];
+      this.rec.push({ op: "appendFlat", tab, row: Object.fromEntries(cols.map((c, j) => [c, cur[j] ?? ""])) });
+    }
     const w = await this.ws(tab);
     await this.batch([{ deleteDimension: { range: { sheetId: w.id, dimension: "ROWS", startIndex: row - 1, endIndex: row } } }]);
   }
@@ -365,7 +412,11 @@ export class Store {
     return false;
   }
   async setSetting(key: string, value: unknown): Promise<void> {
-    if (!(await this.updateRow("Settings", { key }, { value }))) await this.append("Settings", [{ key, value }]);
+    if (this.rec) {
+      const cur = (await this.getRange(`${q("Settings")}!A:B`, false)).slice(1).find((r) => String(r[0]) === key);
+      this.rec.push({ op: "setSetting", key, value: cur ? (cur[1] ?? "") : null });
+    }
+    if (!(await this.updateRow("Settings", { key }, { value }))) await this.rawAppend("Settings", [{ key, value }]);
   }
 
   // ------------------------------------------------------------ loan tabs
@@ -404,12 +455,14 @@ export class Store {
     await this.batch(reqs);
     await this.refreshWss();
     await this.orderTabs();
+    this.rec?.push({ op: "deleteLoan", id: meta.id });
     return meta.id;
   }
 
   /** Replace the schedule block. statuses: inst_no -> [status, paidOn]. */
   async writeSchedule(loanTab: string, schedule: L.ScheduleRow[], statuses: Record<number, [string, string]>): Promise<void> {
     const w = await this.ws(loanTab);
+    if (this.rec) this.rec.push({ op: "restoreBlock", tab: loanTab, block: await this.getRange(`${q(loanTab)}!A${LOAN_HDR + 1}:I1100`, false) });
     await this.clear([`${q(loanTab)}!A${LOAN_HDR + 1}:I1100`]);
     const rows = schedule.map((r) => { const [st, on] = statuses[r.inst_no] || ["Due", ""];
       return [r.inst_no, fmtDate(r.due_date), r.opening, r.principal, r.interest, r.emi, r.closing, st, on]; });
@@ -427,17 +480,24 @@ export class Store {
     await this.refreshWss();
     await this.values([[`${q(title)}!A1`, [[title]]]]);
     await this.orderTabs();
+    this.rec?.push({ op: "renameTab", from: title, to: loanTab });
     return title;
   }
 
   async updateMeta(loanTab: string, values: Row): Promise<void> {
     const keys = META.map(([, k]) => k);
-    await this.values(Object.entries(values).map(([k, v]) => [`${q(loanTab)}!B${META_ROW0 + keys.indexOf(k)}`, [[v]]] as [string, unknown[][]]));
+    await this.valuesRec(Object.entries(values).map(([k, v]) => [`${q(loanTab)}!B${META_ROW0 + keys.indexOf(k)}`, [[v]]] as [string, unknown[][]]));
   }
 
   async deleteLoan(loanId: string): Promise<void> {
     const { tabs } = await this.readAll();
     const row = tabs.Loans.find((l) => l.id === loanId);
+    if (row && this.rec) {
+      const snap: LoanSnap = { meta: Object.fromEntries([...META.map(([, k]) => [k, row[k]]), ["name", row.name]]),
+        schedule: tabs.Schedule.filter((x) => x.loan_id === loanId).map((x) => ({ inst_no: x.inst_no, due_date: x.due_date, opening: num(x.opening), principal: num(x.principal),
+          interest: num(x.interest), emi: num(x.emi), closing: num(x.closing), status: x.paid ? "Paid" : "Due", paid_on: String(x.paid_date ?? "") })) };
+      this.rec.push({ op: "restoreLoan", snap });
+    }
     if (row) { const w = await this.ws(row.tab); await this.batch([{ deleteSheet: { sheetId: w.id } }]); await this.refreshWss(); }
     await this.sync();
   }
@@ -453,7 +513,9 @@ export class Store {
       const now = r.inst_no <= n;
       if (!!r.paid !== now) vals.push([`${q(tab)}!H${r.row}`, [[now ? "Paid" : "Due", now ? t : ""]]]);
     }
-    await this.values(vals);
+    await this.valuesRec(vals);
+    const last = this.rec?.[this.rec.length - 1];
+    if (last?.op === "cells") last.force = loanId;
     await this.sync(undefined, new Set([loanId]));
   }
 
@@ -785,17 +847,17 @@ export class Store {
   async appendExtra(md: ISODate, loanName: string, amount: number, note = "", applied = true, result = "", paidBy = ""): Promise<void> {
     const tab = await this.ensureMonth(md);
     const row = await this.nextFreeRow(tab, "K");
-    await this.values([[`${q(tab)}!K${row}`, [[loanName, amount, fmtDate(today()), note]]], [`${q(tab)}!O${row}`, [[applied, result, paidBy]]]]);
+    await this.valuesRec([[`${q(tab)}!K${row}`, [[loanName, amount, fmtDate(today()), note]]], [`${q(tab)}!O${row}`, [[applied, result, paidBy]]]]);
   }
 
   async markExtraApplied(tab: string, row: number, result: string): Promise<void> {
-    await this.values([[`${q(tab)}!M${row}`, [[fmtDate(today())]]], [`${q(tab)}!O${row}`, [[true, result]]]]);
+    await this.valuesRec([[`${q(tab)}!M${row}`, [[fmtDate(today())]]], [`${q(tab)}!O${row}`, [[true, result]]]]);
   }
 
   async addIncome(md: ISODate, person: string, source: string, amount: number, typ: string, received: boolean): Promise<void> {
     const tab = await this.ensureMonth(md);
     const row = await this.nextFreeRow(tab, "R");
-    await this.values([[`${q(tab)}!R${row}`, [[person, source, amount, received, typ]]]]);
+    await this.valuesRec([[`${q(tab)}!R${row}`, [[person, source, amount, received, typ]]]]);
   }
 
   async addRecurring(person: string, source: string, amount: number, also?: ISODate): Promise<void> {
@@ -809,19 +871,107 @@ export class Store {
     const vals: [string, unknown[][]][] = [[`${q(tab)}!G${row}`, [[paid]]], [`${q(tab)}!H${row}`, [[paid ? fmtDate(today()) : ""]]]];
     if (amount != null) vals.push([`${q(tab)}!E${row}`, [[amount]]]);
     if (paidBy != null || !paid) vals.push([`${q(tab)}!J${row}`, [[paid ? paidBy || "" : ""]]]);
-    await this.values(vals);
+    await this.valuesRec(vals);
     await this.sync();
   }
 
   /** Tick several EMI rows (tab, row) at once, then sync once. */
   async setItemsPaid(rows: [string, number][], paid = true, paidBy = ""): Promise<void> {
     const on = paid ? fmtDate(today()) : "";
-    await this.values(rows.flatMap(([tab, row]) => [[`${q(tab)}!G${row}`, [[paid]]], [`${q(tab)}!H${row}`, [[on]]], [`${q(tab)}!J${row}`, [[paid ? paidBy : ""]]]] as [string, unknown[][]][]));
+    await this.valuesRec(rows.flatMap(([tab, row]) => [[`${q(tab)}!G${row}`, [[paid]]], [`${q(tab)}!H${row}`, [[on]]], [`${q(tab)}!J${row}`, [[paid ? paidBy : ""]]]] as [string, unknown[][]][]));
     await this.sync();
   }
 
   async setIncomeReceived(tab: string, row: number, value: boolean): Promise<void> {
-    await this.values([[`${q(tab)}!U${row}`, [[value]]]]);
+    await this.valuesRec([[`${q(tab)}!U${row}`, [[value]]]]);
+  }
+
+  // ------------------------------------------------------------ activity log & undo
+  /** Append one line to the Activity Log (and keep the log from growing past what readAll can see). */
+  async logActivity(e: { action: string; summary: string; ops: Op[]; count: number }): Promise<void> {
+    await this.rawAppend("Activity Log", [{ id: uid(), at: new Date().toISOString(), action: e.action, summary: e.summary, status: "done", undone_at: "", undo: e.ops.length ? pack(e.ops) : "" }]);
+    if (e.count > 900) await this.deleteRows("Activity Log", 2, 401); // drop the oldest 400
+  }
+
+  private async deleteRows(tab: string, first: number, last: number): Promise<void> {
+    const w = await this.ws(tab);
+    await this.batch([{ deleteDimension: { range: { sheetId: w.id, dimension: "ROWS", startIndex: first - 1, endIndex: last } } }]);
+  }
+
+  /** The stored undo payload of a log entry, with its sheet row. */
+  async activityEntry(id: string): Promise<{ row: number; status: string; undo: string } | null> {
+    const cols = FLAT["Activity Log"];
+    const rows = (await this.getRange(`${q("Activity Log")}!A:${colLetter(cols.length - 1)}`, false)).slice(1);
+    const i = rows.findIndex((r) => String(r[0]) === id);
+    return i < 0 ? null : { row: i + 2, status: String(rows[i][4] ?? ""), undo: String(rows[i][6] ?? "") };
+  }
+
+  async markUndone(row: number): Promise<void> {
+    await this.values([[`${q("Activity Log")}!E${row}:F${row}`, [["undone", new Date().toISOString()]]]]);
+  }
+
+  private async findFlatRow(tab: string, match: Row): Promise<number | null> {
+    const cols = FLAT[tab];
+    const rows = (await this.getRange(`${q(tab)}!A:${colLetter(cols.length - 1)}`, false)).slice(1);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (Object.entries(match).every(([k, v]) => String(rows[i][cols.indexOf(k)] ?? "") === String(v ?? ""))) return i + 2;
+    }
+    return null;
+  }
+
+  /** Reverse a logged change. Refuses (changing nothing) if the cells it touched were edited since. */
+  async undoOps(ops: Op[]): Promise<void> {
+    const norm = (v: unknown) => String(v ?? "").trim().toUpperCase();
+    for (const o of ops) if (o.op === "cells") for (const w of o.writes) w.range = fullRange(w.range, w.after); // older entries stored only the start cell
+    const checks = ops.flatMap((o) => (o.op === "cells" ? o.writes : []));
+    if (checks.length) {
+      const res = await this.call(() => this.api.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, valueRenderOption: "UNFORMATTED_VALUE", ranges: checks.map((w) => w.range) }));
+      checks.forEach((w, i) => {
+        const got = (res.data.valueRanges![i].values as unknown[][]) || [];
+        w.after.forEach((row, r) => row.forEach((v, c) => {
+          if (norm(got[r]?.[c]) !== norm(v)) throw new Error("This was changed again after the entry (in the app or the Sheet). Undo the newer changes first.");
+        }));
+      });
+    }
+    const force = new Set<string>();
+    for (const o of [...ops].reverse()) {
+      switch (o.op) {
+        case "cells": {
+          const clears = o.writes.filter((w) => w.before.every((r) => r.every((v) => v === "")));
+          if (clears.length) await this.clear(clears.map((w) => w.range));
+          await this.values(o.writes.filter((w) => !clears.includes(w)).map((w) => [w.range, w.before] as [string, unknown[][]]));
+          if (o.force) force.add(o.force);
+          break;
+        }
+        case "deleteFlatById": { const r = await this.findFlatRow(o.tab, { id: o.id }); if (r) await this.deleteFlat(o.tab, r); break; }
+        case "deleteFlatMatch": { const r = await this.findFlatRow(o.tab, o.match); if (r) await this.deleteFlat(o.tab, r); break; }
+        case "appendFlat": await this.rawAppend(o.tab, [o.row]); break;
+        case "updateFlatById": { const r = await this.findFlatRow(o.tab, { id: o.id }); if (r) await this.updateFlat(o.tab, r, o.vals); break; }
+        case "setSetting": {
+          if (o.value === null) { const r = await this.findFlatRow("Settings", { key: o.key }); if (r) await this.deleteFlat("Settings", r); } else await this.setSetting(o.key, o.value);
+          break;
+        }
+        case "deleteLoan": { const { tabs } = await this.readAll(); if (tabs.Loans.some((l) => l.id === o.id)) await this.deleteLoan(o.id); break; }
+        case "restoreLoan": {
+          const { tabs } = await this.readAll();
+          if (tabs.Loans.some((l) => l.id === o.snap.meta.id)) break;
+          const sch: L.ScheduleRow[] = o.snap.schedule.map((x) => ({ ...x, due_date: parseDate(x.due_date) }));
+          const statuses: Record<number, [string, string]> = Object.fromEntries(o.snap.schedule.map((x) => [x.inst_no, [x.status, x.paid_on] as [string, string]]));
+          await this.createLoanTab(o.snap.meta, sch.length ? sch : null, 0);
+          if (sch.length) await this.writeSchedule(String(o.snap.meta.name), sch, statuses);
+          force.add(String(o.snap.meta.id));
+          break;
+        }
+        case "restoreBlock": {
+          const w = await this.ws(o.tab);
+          await this.clear([`${q(o.tab)}!A${LOAN_HDR + 1}:I1100`]);
+          if (o.block.length) { await this.values([[`${q(o.tab)}!A${LOAN_HDR + 1}`, o.block]]); await this.batch([this.numfmtReq(w.id, LOAN_HDR, LOAN_HDR + o.block.length, 2, 7)]); }
+          break;
+        }
+        case "renameTab": await this.renameLoan(o.from, o.to); break;
+      }
+    }
+    await this.sync(undefined, force);
   }
 }
 

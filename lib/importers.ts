@@ -1,6 +1,7 @@
 /** Parse repayment-schedule PDFs and loan screenshots into a normalised loan + schedule (port of pdf_import.py / image_import.py). */
 import "server-only";
-import { MODEL, anthropic, parseJsonObject } from "./ai";
+import { parseJsonObject } from "./ai";
+import { complete } from "./llm";
 import { ISODate, addMonths, parseDate, today } from "./dates";
 import * as L from "./loans";
 import { ScheduleRow } from "./loans";
@@ -143,9 +144,8 @@ const IMAGE_PROMPT =
   "Amounts are plain numbers in rupees. Use null for anything not visible; never guess.";
 
 export async function parseImage(data: Buffer, mediaType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"): Promise<Parsed> {
-  const msg = await anthropic().messages.create({ model: MODEL, max_tokens: 800, messages: [{ role: "user", content: [
-    { type: "image", source: { type: "base64", media_type: mediaType, data: data.toString("base64") } }, { type: "text", text: IMAGE_PROMPT }] }] });
-  const raw = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+  const ext = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" }[mediaType];
+  const raw = await complete(IMAGE_PROMPT, { image: { data, ext }, timeoutMs: 120_000 });
   const d = parseJsonObject<Record<string, number | string | null>>(raw, () => true);
   if (!d) throw new Error("Could not read details from this image");
   const principal = Number(d.principal), months = Number(d.tenure_months);

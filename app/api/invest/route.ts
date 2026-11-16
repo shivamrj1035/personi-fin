@@ -1,14 +1,9 @@
 import { NextResponse } from "next/server";
-import { advise } from "@/lib/invest";
-import { State, Tabs } from "@/lib/state";
+import { handleInvest } from "@/lib/ai-handlers";
 
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  const { tabs, investable, question } = (await req.json()) as { tabs: Tabs; investable: number; question?: string };
-  try {
-    return NextResponse.json(await advise(new State(tabs), Number(investable) || 0, question || ""));
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
-  }
+  const r = await handleInvest(await req.json());
+  return NextResponse.json(r.body, { status: r.status });
 }

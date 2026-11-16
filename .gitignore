@@ -47,3 +47,4 @@ sources/
 !.env.example
 .claude/
 AGENTS.md
+/.next-*/

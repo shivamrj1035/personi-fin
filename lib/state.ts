@@ -8,7 +8,7 @@ export type Row = Record<string, any>;
 
 export interface Tabs {
   Loans: Row[]; Schedule: Row[]; Payments: Row[]; Extras: Row[]; Income: Row[]; MonthItems: Row[];
-  Recurring: Row[]; Expenses: Row[]; Goals: Row[]; Holdings: Row[]; SavingsLog: Row[]; Settings: Row[];
+  Recurring: Row[]; Expenses: Row[]; Goals: Row[]; Holdings: Row[]; SavingsLog: Row[]; Settings: Row[]; Activity: Row[];
 }
 
 export function num(v: unknown, dflt = 0): number {
@@ -190,4 +190,4 @@ export class State {
 }
 
 export const emptyTabs = (): Tabs => ({ Loans: [], Schedule: [], Payments: [], Extras: [], Income: [], MonthItems: [], Recurring: [],
-  Expenses: [], Goals: [], Holdings: [], SavingsLog: [], Settings: [] });
+  Expenses: [], Goals: [], Holdings: [], SavingsLog: [], Settings: [], Activity: [] });

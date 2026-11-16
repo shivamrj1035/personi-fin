@@ -1,17 +1,9 @@
 /** the AI as the advisor (server only). Code computes the numbers; the AI explains and prioritises. */
 import "server-only";
-import Anthropic from "@anthropic-ai/sdk";
+import { complete } from "./llm";
 import { today, fmtDate, monthLong } from "./dates";
 import { compareStrategies, monthlyBandwidth } from "./planner";
 import { State, num } from "./state";
-
-export const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
-
-let client: Anthropic | null = null;
-export function anthropic(): Anthropic {
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set. Add it in your Vercel project's environment variables.");
-  return (client ||= new Anthropic());
-}
 
 export const SYSTEM =
   "You are a calm, practical personal-finance coach for an Indian household (amounts in INR, ₹). " +
@@ -47,12 +39,8 @@ export function buildContext(state: State) {
   return { today: fmtDate(today()), month: monthLong(today()), bandwidth: bw, loans, extra_per_month_used: Math.round(bw.spare), strategy_comparison: comp };
 }
 
-export async function ask(facts: unknown, question: string, system = SYSTEM, maxTokens = 2000): Promise<string> {
-  const msg = await anthropic().messages.create({
-    model: MODEL, max_tokens: maxTokens, system,
-    messages: [{ role: "user", content: `FACTS (JSON):\n${JSON.stringify(facts)}\n\nQUESTION:\n${question}` }],
-  });
-  return msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
+export async function ask(facts: unknown, question: string, system = SYSTEM): Promise<string> {
+  return complete(`${system}\n\nFACTS (JSON):\n${JSON.stringify(facts)}\n\nQUESTION:\n${question}`);
 }
 
 export interface VisualAnswer {

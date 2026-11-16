@@ -1,6 +1,7 @@
 "use client";
-/** Add a loan (app.py::add_loan_dialog): import a PDF / screenshot, or answer a few questions; always confirm before saving. */
+/** Add a loan: import a PDF / screenshot, or answer a few questions; always confirm before saving. */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { aiFetch } from "@/lib/ai-client";
 import { ArrowLeft, FileText, ImagePlus, Lock, PenLine, Upload } from "lucide-react";
 import { useData } from "@/lib/app-context";
 import { addMonths, parseDate, today } from "@/lib/dates";
@@ -31,7 +32,7 @@ function Wizard({ onClose }: { onClose: () => void }) {
     if (password) fd.append("password", password);
     try {
       const d = await busy(kind === "pdf" ? "Reading your PDF..." : "Claude is reading your screenshot...", async () => {
-        const res = await fetch(`/api/import/${kind}`, { method: "POST", body: fd });
+        const res = await (kind === "image" ? aiFetch : fetch)(`/api/import/${kind}`, { method: "POST", body: fd });
         const j = await res.json().catch(() => ({ error: `Server error (${res.status})` }));
         if (res.status === 401) throw new Error("Signed out - please reload and sign in again");
         return j as { parsed?: Parsed; needsPassword?: boolean; wrong?: boolean; error?: string };

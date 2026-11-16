@@ -2,6 +2,7 @@
 /** Client data layer: holds the workbook, the selected month, and the one way to change anything (`act`). */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, CheckCircle2, Info, Loader2 } from "lucide-react";
+import { aiFetch } from "./ai-client";
 import { ISODate, addMonths, firstOfMonth, monthKey, today } from "./dates";
 import { State, Tabs } from "./state";
 
@@ -93,7 +94,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [busy, setIfChanged, toast]);
 
   const ai = useCallback(async <T,>(path: string, body: Record<string, unknown> = {}): Promise<T> =>
-    json<T>(await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, tabs: tabsRef.current }) })), []);
+    json<T>(await aiFetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, tabs: tabsRef.current }) })), []);
 
   // initial load from the server
   // eslint-disable-next-line react-hooks/set-state-in-effect

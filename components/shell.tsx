@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
-import { CandlestickChart, ChevronLeft, ChevronRight, Flag, Home, Landmark, LogOut, MoreHorizontal, Plus, ReceiptText, RefreshCw, Settings, Sparkles, Table2, TrendingDown, Wallet, ArrowLeftRight, Lightbulb, AlertTriangle } from "lucide-react";
+import { CandlestickChart, ChevronLeft, ChevronRight, Flag, Home, Landmark, LogOut, MoreHorizontal, Plus, ReceiptText, RefreshCw, Settings, Sparkles, Table2, TrendingDown, Wallet, ArrowLeftRight, Lightbulb, AlertTriangle, History } from "lucide-react";
 import { useApp } from "@/lib/app-context";
 import { MONTHS_SHORT, firstOfMonth, parts, today, addMonths } from "@/lib/dates";
 import { SHEET_ID } from "@/lib/config";
@@ -21,6 +21,7 @@ const NAV = [
   { href: "/planner", label: "Planner", icon: Lightbulb },
   { href: "/ask", label: "Ask Claude", icon: Sparkles },
   { href: "/finance", label: "Claude in Finance", icon: CandlestickChart },
+  { href: "/activity", label: "Activity log", icon: History },
 ];
 const BOTTOM = ["/", "/loans", "/expenses", "/income"];
 
