@@ -22,6 +22,15 @@ export function num(v: unknown, dflt = 0): number {
 export const truthy = (v: unknown): boolean => ["TRUE", "1", "YES", "Y"].includes(String(v ?? "").trim().toUpperCase());
 export const toDate = parseDate;
 
+export interface Payoff {
+  /** Principal still owed. */ principal: number;
+  /** Interest still to pay if the schedule is followed (null when it depends on how long you take). */ interest: number | null;
+  /** principal + interest, i.e. everything still to pay until the loan ends (null when open-ended). */ total: number | null;
+  /** Already paid in instalments, and the interest part of that. */ paid: number; paidInterest: number;
+  /** Interest over the whole loan (paid + still to pay), and everything you pay in total. */ lifeInterest: number | null; lifeTotal: number | null;
+  /** Last instalment / deadline. */ end: ISODate | null;
+}
+
 export interface PersonSummary { person: string; expected: number; received: number; loans: number; expenses: number; extra: number; paid: number; net: number }
 
 export class State {
@@ -45,6 +54,27 @@ export class State {
     const paidAmt = this.tabs.Payments.filter((p) => p.loan_id === loan.id && (p.kind === "principal" || p.kind === "extra"))
       .reduce((s, p) => s + num(p.amount), 0);
     return Math.max(num(loan.outstanding) - paidAmt, 0);
+  }
+
+  /** What the rest of the loan costs, interest included. Uses the schedule when there is one. */
+  payoff(loan: Row): Payoff {
+    const principal = this.outstanding(loan);
+    const sch = this.schedule(loan.id);
+    if (sch.length) {
+      const unpaid = sch.filter((r) => !truthy(r.paid)), paid = sch.filter((r) => truthy(r.paid));
+      const interest = unpaid.reduce((a, r) => a + num(r.interest), 0), paidInterest = paid.reduce((a, r) => a + num(r.interest), 0);
+      const paidAmt = paid.reduce((a, r) => a + num(r.emi), 0);
+      return { principal, interest, total: unpaid.reduce((a, r) => a + num(r.emi), 0), paid: paidAmt, paidInterest, lifeInterest: interest + paidInterest,
+        lifeTotal: paidAmt + unpaid.reduce((a, r) => a + num(r.emi), 0), end: toDate(sch[sch.length - 1].due_date) };
+    }
+    const end = toDate(loan.deadline);
+    const paid = this.tabs.Payments.filter((p) => p.loan_id === loan.id).reduce((a, p) => a + num(p.amount), 0);
+    if (loan.type === "bullet" && end) { // interest every month until the due date, then the principal
+      const interest = this.bulletEffect(loan, 0)[0];
+      return { principal, interest, total: principal + interest, paid, paidInterest: 0, lifeInterest: null, lifeTotal: null, end };
+    }
+    if (loan.type === "interest_only") return { principal, interest: null, total: null, paid, paidInterest: 0, lifeInterest: null, lifeTotal: null, end: null };
+    return { principal, interest: 0, total: principal, paid, paidInterest: 0, lifeInterest: 0, lifeTotal: null, end }; // interest-free
   }
 
   paidCount(loanId: string): number { return this.schedule(loanId).filter((s) => truthy(s.paid)).length; }

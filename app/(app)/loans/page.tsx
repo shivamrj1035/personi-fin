@@ -1,7 +1,7 @@
 "use client";
 /** Loans & borrowings (app.py::loans_page, loan_card, loan_detail). */
 import { useMemo, useState } from "react";
-import { Bolt, CalendarClock, Check, ChevronRight, Landmark, Pencil, Plus, Trash2, Undo2, Wallet } from "lucide-react";
+import { Banknote, Bolt, CalendarClock, Check, ChevronRight, Landmark, Pencil, Plus, Trash2, Undo2, Wallet } from "lucide-react";
 import { useData } from "@/lib/app-context";
 import { parseDate, today } from "@/lib/dates";
 import { dateLabel, inr, monthsLabel } from "@/lib/format";
@@ -27,6 +27,10 @@ export default function LoansPage() {
   const totals = useMemo(() => ({
     out: active.reduce((s, l) => s + state.outstanding(l), 0),
     monthly: active.reduce((s, l) => s + state.monthlyDue(l), 0),
+    // everything still to pay until the loans end; open-ended loans (interest only) count their principal
+    payTotal: active.reduce((s, l) => { const p = state.payoff(l); return s + (p.total ?? p.principal); }, 0),
+    payInterest: active.reduce((s, l) => s + (state.payoff(l).interest ?? 0), 0),
+    openEnded: active.some((l) => state.payoff(l).total === null),
   }), [active, state]);
 
   const list = useMemo(() => {
@@ -48,7 +52,8 @@ export default function LoansPage() {
         <KpiGrid>
           <Kpi label="Total outstanding" value={inr(totals.out)} icon={<Landmark />} />
           <Kpi label="Due every month" value={inr(totals.monthly)} icon={<CalendarClock />} tone="warn" />
-          <Kpi label="Active loans" value={active.length} icon={<Wallet />} tone="good" className="col-span-2 lg:col-span-1" />
+          <Kpi label="To pay till the end" value={inr(totals.payTotal)} sub={`incl. ${inr(totals.payInterest)} interest${totals.openEnded ? " (+ open-ended loans)" : ""}`} icon={<Banknote />} tone="bad" className="col-span-2 lg:col-span-1" />
+          <Kpi label="Active loans" value={active.length} icon={<Wallet />} tone="good" />
         </KpiGrid>
       )}
 
@@ -106,6 +111,12 @@ function LoanCard({ loan: l, onOpen, onEdit }: { loan: Row; onOpen: () => void; 
         <span>{Math.round(pct * 100)}% repaid{total ? ` · ${state.paidCount(l.id)}/${Math.trunc(total)} EMIs` : ""}</span>
         <span>{due ? `Next: ${inr(amt)} on ${dateLabel(due)}` : `Monthly: ${inr(state.monthlyDue(l))}`}</span>
       </div>
+      {!closed && (() => { const p = state.payoff(l); return p.total === null
+        ? <div className="rounded-lg bg-soft px-3 py-2 text-xs text-muted">Interest only: the {inr(out)} principal is still owed whenever you clear it.</div>
+        : <div className="flex items-center justify-between gap-3 rounded-lg bg-soft px-3 py-2 text-xs">
+            <span className="text-muted">To pay till the end{p.end ? ` (${dateLabel(p.end)})` : ""}</span>
+            <span className="text-right"><b className="text-sm tabular-nums">{inr(p.total)}</b>{p.interest ? <span className="text-muted"> · incl. {inr(p.interest)} interest</span> : null}</span>
+          </div>; })()}
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs text-muted">{num(l.rate_pa) ? `${num(l.rate_pa)}% p.a.` : "No interest"}{l.rate_type ? ` · ${l.rate_type}` : ""}</span>
         <Button variant="soft" size="sm" onClick={onOpen}>Manage<ChevronRight className="h-4 w-4" /></Button>
@@ -148,6 +159,17 @@ function LoanDetail({ loan: l, onClose, onEdit }: { loan: Row; onClose: () => vo
             </>) : <Kpi label="Monthly" value={inr(state.monthlyDue(l))} icon={<CalendarClock />} />}
             {sch.length > 0 && <Kpi label="EMIs left" value={left} sub={`${sch.length - left} paid`} tone="good" />}
           </KpiGrid>
+
+          {(() => { const p = state.payoff(l); return p.total === null ? null : (
+            <div className="rounded-2xl border border-line bg-soft p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Cost of the loan</div>
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div><div className="text-xs text-muted">Still to pay till the end{p.end ? ` (${dateLabel(p.end)})` : ""}</div><div className="text-xl font-bold tabular-nums">{inr(p.total)}</div></div>
+                <div><div className="text-xs text-muted">of which interest</div><div className="text-xl font-bold tabular-nums text-bad">{inr(p.interest ?? 0)}</div></div>
+                {p.lifeTotal != null && <div><div className="text-xs text-muted">Whole loan: you pay in total</div><div className="text-xl font-bold tabular-nums">{inr(p.lifeTotal)}</div>
+                  <div className="text-xs text-muted">{inr(p.lifeInterest ?? 0)} interest · {inr(p.paid)} already paid</div></div>}
+              </div>
+            </div>); })()}
 
           <Field label="Payments recorded here are paid by" className="sm:max-w-xs">
             <Select value={payer} onChange={(e) => setPayer(e.target.value)}>{payers.map((p) => <option key={p}>{p}</option>)}</Select>
