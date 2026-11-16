@@ -243,10 +243,15 @@ function ScheduleSection({ loan: l, sch }: { loan: Row; sch: Row[] }) {
   const paid = state.paidCount(l.id);
   const [through, setThrough] = useState<number | null>(Math.min(paid + 1, sch.length));
   const [all, setAll] = useState(false);
+  const [allPaid, setAllPaid] = useState(false);
   const set = (n: number, msg: string) => act("setPaidThrough", { loanId: l.id, n }, { msg });
-  const firstUnpaid = Math.max(sch.findIndex((s) => !truthy(s.paid)), 0);
-  const start = all ? 0 : Math.max(firstUnpaid - 1, 0);
-  const rows = all ? sch : sch.slice(start, start + 12);
+  const firstUnpaid = sch.findIndex((s) => !truthy(s.paid));
+  const split = firstUnpaid < 0 ? sch.length : firstUnpaid;       // everything before this is paid
+  const paidRows = sch.slice(0, split), upcoming = sch.slice(split);
+  const PAID_SHOWN = 6, UPCOMING_SHOWN = 12;
+  const shownPaid = allPaid ? paidRows : paidRows.slice(-PAID_SHOWN);
+  const rows = [...shownPaid, ...(all ? upcoming : upcoming.slice(0, UPCOMING_SHOWN))];
+  const paidSum = paidRows.reduce((a, r) => a + num(r.emi), 0);
   const th = "px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted";
   return (
     <section className="space-y-3">
@@ -261,12 +266,14 @@ function ScheduleSection({ loan: l, sch }: { loan: Row; sch: Row[] }) {
         <Button size="md" variant="outline" disabled={through == null || through < 0 || through > sch.length || through === paid}
           onClick={() => set(Math.trunc(through ?? 0), `Marked ${Math.trunc(through ?? 0)} EMIs paid`)}>Apply</Button>
       </div>
+      {paidRows.length > 0 && <p className="text-sm text-muted">{paidRows.length} EMI{paidRows.length === 1 ? "" : "s"} paid so far · {inr(paidSum)} paid</p>}
+      {paidRows.length > PAID_SHOWN && <Button size="sm" variant="ghost" onClick={() => setAllPaid((v) => !v)}>{allPaid ? "Hide earlier paid EMIs" : `Show ${paidRows.length - PAID_SHOWN} earlier paid EMIs`}</Button>}
       <div className="overflow-x-auto rounded-xl border border-line">
         <table className="w-full min-w-[640px] text-sm tabular-nums">
           <thead className="bg-soft"><tr>{["No", "Due", "Opening", "Principal", "Interest", "EMI", "Closing", "Status"].map((h) => <th key={h} className={th}>{h}</th>)}</tr></thead>
           <tbody>
             {rows.map((r) => { const p = truthy(r.paid); return (
-              <tr key={r.inst_no} className={cn("border-t border-line", !p && num(r.inst_no) === num(sch[firstUnpaid]?.inst_no) && "bg-primary-soft")}>
+              <tr key={r.inst_no} className={cn("border-t border-line", !p && firstUnpaid >= 0 && num(r.inst_no) === num(sch[firstUnpaid].inst_no) && "bg-primary-soft")}>
                 <td className="px-3 py-2">{num(r.inst_no)}</td><td className="px-3 py-2">{dateLabel(parseDate(r.due_date))}</td>
                 <td className="px-3 py-2">{inr(num(r.opening))}</td><td className="px-3 py-2">{inr(num(r.principal))}</td>
                 <td className="px-3 py-2">{inr(num(r.interest))}</td><td className="px-3 py-2">{inr(num(r.emi))}</td>
@@ -275,7 +282,7 @@ function ScheduleSection({ loan: l, sch }: { loan: Row; sch: Row[] }) {
           </tbody>
         </table>
       </div>
-      {sch.length > 12 && <Button size="sm" variant="ghost" onClick={() => setAll((v) => !v)}>{all ? "Show fewer" : `Show all ${sch.length} instalments`}</Button>}
+      {upcoming.length > UPCOMING_SHOWN && <Button size="sm" variant="ghost" onClick={() => setAll((v) => !v)}>{all ? "Show fewer upcoming" : `Show all ${upcoming.length} upcoming instalments`}</Button>}
     </section>
   );
 }
